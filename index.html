@@ -57,6 +57,7 @@
       <button onclick="switchTab('overview')" id="tab-overview" class="tab-active px-5 py-3 text-sm transition-colors">Overview</button>
       <button onclick="switchTab('pipeline')" id="tab-pipeline" class="tab-inactive px-5 py-3 text-sm transition-colors">Pipeline</button>
       <button onclick="switchTab('deliverables')" id="tab-deliverables" class="tab-inactive px-5 py-3 text-sm transition-colors">Deliverables</button>
+      <button onclick="switchTab('request')" id="tab-request" class="tab-inactive px-5 py-3 text-sm transition-colors">✉️ Submit Request</button>
     </nav>
   </div>
 </div>
@@ -594,8 +595,13 @@ function renderDeliverables() {
 
 // ─── Tab Switching ────────────────────────────────────────────────────────
 function switchTab(tab) {
-  ['overview','pipeline','deliverables'].forEach(t => {
-    document.getElementById(`view-${t}`).classList.toggle('hidden', t !== tab);
+  ['overview','pipeline','deliverables','request'].forEach(t => {
+    const view = document.getElementById(`view-${t}`);
+    if (t === 'request') {
+      view.style.display = t === tab ? 'block' : 'none';
+    } else {
+      view.classList.toggle('hidden', t !== tab);
+    }
     document.getElementById(`tab-${t}`).className =
       t === tab ? 'tab-active px-5 py-3 text-sm transition-colors' : 'tab-inactive px-5 py-3 text-sm transition-colors';
   });
@@ -643,6 +649,113 @@ async function loadData() {
 }
 
 loadData();
+
+// ── REQUEST FORM ─────────────────────────────────────────────────────────────
+const WEBHOOK_URL = 'https://webhooks.tasklet.ai/v1/public/webhook?token=a7a9e73043b1fdd677db13d922890564';
+
+document.getElementById('req-form').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  const btn = document.getElementById('req-submit');
+  const status = document.getElementById('req-status');
+
+  const payload = {
+    task:       document.getElementById('req-task').value.trim(),
+    category:   document.getElementById('req-category').value,
+    priority:   document.getElementById('req-priority').value,
+    deadline:   document.getElementById('req-deadline').value,
+    requester:  document.getElementById('req-name').value.trim(),
+    submitted_at: new Date().toISOString()
+  };
+
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  status.textContent = '';
+
+  try {
+    await fetch(WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    status.className = 'mt-4 p-3 rounded-lg bg-green-50 border border-green-200 text-green-700 text-sm text-center';
+    status.textContent = '✅ Request submitted! The RLB team has been notified.';
+    document.getElementById('req-form').reset();
+  } catch (err) {
+    status.className = 'mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm text-center';
+    status.textContent = '❌ Submission failed. Please try again or email madison@rightlanebrands.com.';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Submit Request';
+  }
+});
 </script>
+
+<!-- REQUEST TAB PANEL -->
+<div id="view-request" style="display:none">
+  <div class="max-w-xl mx-auto mt-6">
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+      <h2 class="font-bold text-gray-900 text-lg mb-1">Submit a Request to RLB</h2>
+      <p class="text-sm text-gray-500 mb-6">Use this form to send tasks or requests to the Right Lane Brands team. We'll get back to you shortly.</p>
+
+      <form id="req-form" class="space-y-4">
+        <!-- Task description -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">What do you need? <span class="text-red-500">*</span></label>
+          <textarea id="req-task" required rows="3" placeholder="Describe the task or request…"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 resize-none"></textarea>
+        </div>
+
+        <!-- Category -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Category <span class="text-red-500">*</span></label>
+          <select id="req-category" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 bg-white">
+            <option value="" disabled selected>Select a category…</option>
+            <option>Monitor/Follow-up</option>
+            <option>Calls/Meetings</option>
+            <option>Forms/Paperwork</option>
+            <option>Application/Demo</option>
+            <option>Decks/Plans</option>
+            <option>Pitch/Events</option>
+            <option>Dashboard Updates</option>
+            <option>Other</option>
+          </select>
+        </div>
+
+        <!-- Priority + Deadline row -->
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Priority <span class="text-red-500">*</span></label>
+            <select id="req-priority" required class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 bg-white">
+              <option value="" disabled selected>Select…</option>
+              <option>High</option>
+              <option>Medium</option>
+              <option>Low</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Deadline</label>
+            <input type="date" id="req-deadline"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500" />
+          </div>
+        </div>
+
+        <!-- Your name -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Your Name</label>
+          <input type="text" id="req-name" placeholder="e.g. Keya"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500" />
+        </div>
+
+        <button type="submit" id="req-submit"
+          class="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2.5 rounded-lg text-sm transition-colors">
+          Submit Request
+        </button>
+      </form>
+
+      <div id="req-status"></div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
