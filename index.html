@@ -302,15 +302,23 @@ function fmtMoney(v) {
   return '$' + n.toFixed(0);
 }
 
+// CSV exports percentages as "5.00%" strings — convert to 0–1 decimal
+function parseProbDec(v) {
+  if (v === null || v === undefined || v === '') return NaN;
+  const s = String(v).trim();
+  if (s.endsWith('%')) return parseFloat(s) / 100;
+  return parseFloat(s);
+}
+
 function fmtProb(v) {
   if (!v && v !== 0) return '—';
-  const n = parseFloat(v);
-  if (isNaN(n)) return v;
+  const n = parseProbDec(v);
+  if (isNaN(n)) return String(v);
   return Math.round(n * 100) + '%';
 }
 
 function probClass(v) {
-  const n = parseFloat(v);
+  const n = parseProbDec(v);
   if (isNaN(n)) return 'prob-zero';
   if (n >= 1.0) return 'prob-high';
   if (n >= 0.5) return 'prob-high';
@@ -431,10 +439,10 @@ function renderOverview() {
 
   // Pipeline stages
   const stages = [
-    { label: 'Won (100%)',   filter: r => parseFloat(r.probability) >= 1.0,                   cls: 'bg-green-100 text-green-800' },
-    { label: 'High (50–99%)',filter: r => parseFloat(r.probability) >= 0.5 && parseFloat(r.probability) < 1.0, cls: 'bg-emerald-50 text-emerald-700' },
-    { label: 'Medium (10–49%)',filter: r => parseFloat(r.probability) >= 0.1 && parseFloat(r.probability) < 0.5, cls: 'bg-yellow-50 text-yellow-700' },
-    { label: 'Low (<10%)',   filter: r => parseFloat(r.probability) > 0 && parseFloat(r.probability) < 0.1,    cls: 'bg-red-50 text-red-700' },
+    { label: 'Won (100%)',   filter: r => parseProbDec(r.probability) >= 1.0,                          cls: 'bg-green-100 text-green-800' },
+    { label: 'High (50–99%)',filter: r => parseProbDec(r.probability) >= 0.5 && parseProbDec(r.probability) < 1.0, cls: 'bg-emerald-50 text-emerald-700' },
+    { label: 'Medium (10–49%)',filter: r => parseProbDec(r.probability) >= 0.1 && parseProbDec(r.probability) < 0.5, cls: 'bg-yellow-50 text-yellow-700' },
+    { label: 'Low (<10%)',   filter: r => parseProbDec(r.probability) > 0 && parseProbDec(r.probability) < 0.1,    cls: 'bg-red-50 text-red-700' },
   ];
   const stagesEl = document.getElementById('pipeline-stages');
   stagesEl.innerHTML = '';
@@ -505,7 +513,7 @@ function renderPipeline() {
     if (search && !r.customer.toLowerCase().includes(search)) return false;
     if (catFilter && r.category !== catFilter) return false;
     if (probFilter) {
-      const n = parseFloat(r.probability);
+      const n = parseProbDec(r.probability);
       if (probFilter === 'won'  && n < 1.0)              return false;
       if (probFilter === 'high' && (n < 0.5 || n >= 1.0)) return false;
       if (probFilter === 'med'  && (n < 0.1 || n >= 0.5)) return false;
