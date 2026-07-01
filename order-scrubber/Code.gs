@@ -185,11 +185,13 @@ function processMessage_(message, existingOrderKeys) {
   // Dedupe per line item: Customer + PO Date + (SKU Name, or PO Number when
   // the SKU is a manual-entry placeholder). This lets multiple genuine SKUs
   // on one PO all get written, while still catching re-processed emails.
+  // Keys are NOT added to existingOrderKeys until after a successful write
+  // below — otherwise a failed write would still "reserve" the key, making
+  // every later mention of that same order silently look like a duplicate
+  // instead of surfacing the real failure.
   var newItems = extraction.line_items.filter(function (item) {
     var key = orderKey_(extraction.customer, extraction.po_date, extraction.po_number, item.sku_name);
-    if (existingOrderKeys.has(key)) return false;
-    existingOrderKeys.add(key);
-    return true;
+    return !existingOrderKeys.has(key);
   });
 
   if (newItems.length === 0) {
@@ -199,6 +201,11 @@ function processMessage_(message, existingOrderKeys) {
   }
 
   appendOrderRows_(extraction, newItems, permalink);
+
+  newItems.forEach(function (item) {
+    existingOrderKeys.add(orderKey_(extraction.customer, extraction.po_date, extraction.po_number, item.sku_name));
+  });
+
   addLabel_(thread, CONFIG.LABEL_PROCESSED);
 }
 
