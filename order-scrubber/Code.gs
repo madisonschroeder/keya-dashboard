@@ -567,7 +567,7 @@ function addLabel_(thread, labelName) {
 // same PO number/SKU can never both get written.
 // ─────────────────────────────────────────────────────────────────────────
 var FAIRE_ORDERS_URL = 'https://www.faire.com/external-api/v2/orders';
-var FAIRE_BACKFILL_DAYS = 90; // how far back to look on the very first pull
+var FAIRE_BACKFILL_DAYS = 1; // how far back to look on the very first pull
 
 function pullFaireOrders() {
   var headers = faireAuthHeaders_();
