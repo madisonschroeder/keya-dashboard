@@ -38,9 +38,10 @@
  * - Every message gets one Claude call. Claude returns a JSON object saying
  *   whether it's actually an order, plus the order fields and a list of
  *   line items (one row per SKU).
- * - Rule: REQUIRED FIELDS. If Claude can't find a customer name, a PO/order
- *   number, or at least one line item, the row is NOT written to the Orders
- *   tab — it goes to "Needs Review" instead.
+ * - Rule: REQUIRED FIELDS. If Claude can't find a customer name or at least
+ *   one line item, the row is NOT written to the Orders tab — it goes to
+ *   "Needs Review" instead. A missing PO Number is NOT a blocker on its own
+ *   — direct/local customer orders legitimately don't have one.
  * - Rule: HYBRID MANUAL ENTRY. Rainforest Distribution POs (PDF attachment)
  *   and KeHE/SPS Commerce notifications (details behind a portal login)
  *   still get a row — with SKU Name "TBD" and "MANUAL ENTRY NEEDED" in
@@ -167,9 +168,12 @@ function processMessage_(message, existingOrderKeys) {
 
   extraction.customer = normalizeCustomerName_(extraction.customer);
 
+  // po_number is deliberately NOT required here: direct/local customer
+  // orders (e.g. an informal email placing an order) legitimately have no
+  // PO number, and should still be written with a blank PO Number rather
+  // than stalling in Needs Review.
   var missing = [];
   if (!extraction.customer) missing.push('customer');
-  if (!extraction.po_number) missing.push('po_number');
   if (!extraction.line_items || extraction.line_items.length === 0) missing.push('line_items');
 
   if (missing.length > 0) {
