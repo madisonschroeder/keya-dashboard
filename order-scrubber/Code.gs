@@ -23,9 +23,11 @@
  *    function dropdown, click Run). It will:
  *      - create the Gmail sub-labels this script uses to track state
  *      - create the "Needs Review" tab on the sheet if it doesn't exist
- *      - install a time-driven trigger to run processOrderEmails() every 15 min
+ *      - install time-driven triggers to run processOrderEmails() at the
+ *        hours listed in CONFIG.RUN_HOURS below (currently 8am, 1pm, 8pm,
+ *        in the script's time zone — Project Settings > time zone)
  *    The first run will prompt you to authorize Gmail + Sheets access.
- * 5. Done. New order emails will show up as rows within ~15 minutes.
+ * 5. Done. New order emails will show up as rows after the next scheduled run.
  *
  * This scans the whole inbox (no Gmail label/filter setup required) since
  * this inbox is mostly order emails already — Claude's is_order check does
@@ -86,7 +88,11 @@ var CONFIG = {
   LABEL_ERROR: 'orders/error',
 
   CLAUDE_MODEL: 'claude-haiku-4-5', // swap to 'claude-opus-4-8' if extraction quality needs it
-  MAX_THREADS_PER_RUN: 20,
+  MAX_THREADS_PER_RUN: 40,
+
+  // Hours of the day (24-hour, script's time zone) to run processOrderEmails.
+  // One trigger per hour listed here — currently morning / midday / evening.
+  RUN_HOURS: [8, 13, 20],
 };
 
 var ORDERS_HEADER = [
@@ -118,14 +124,16 @@ function setup() {
   getOrCreateSheet_(CONFIG.NEEDS_REVIEW_SHEET_NAME, NEEDS_REVIEW_HEADER);
   ensureOrdersHeader_();
   installTrigger_();
-  Logger.log('Setup complete. processOrderEmails() will run every 15 minutes.');
+  Logger.log('Setup complete. processOrderEmails() will run at hours: ' + CONFIG.RUN_HOURS.join(', ') + ' (script time zone).');
 }
 
 function installTrigger_() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'processOrderEmails') ScriptApp.deleteTrigger(t);
   });
-  ScriptApp.newTrigger('processOrderEmails').timeBased().everyMinutes(15).create();
+  CONFIG.RUN_HOURS.forEach(function (hour) {
+    ScriptApp.newTrigger('processOrderEmails').timeBased().atHour(hour).everyDays(1).create();
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────
