@@ -48,8 +48,12 @@
  *   Notes — rather than being dropped or sent to Needs Review, matching how
  *   the team already works these.
  * - Rule: DEDUPE. Before writing, the script builds a key per existing row
- *   of Customer + PO Date + (SKU Name, or PO Number when SKU is "TBD"). A
- *   new line item matching an existing key is skipped as a duplicate. This
+ *   of Customer + PO Number + SKU Name when a PO Number is available
+ *   (PO Number is more reliable than date — a BOL/pickup follow-up email
+ *   about the same PO often carries a different or missing date than the
+ *   original order email), falling back to Customer + PO Date + SKU Name
+ *   when there's no PO Number at all (informal direct/local orders). A new
+ *   line item matching an existing key is skipped as a duplicate. This
  *   allows multiple SKUs on the same PO to all get written, while still
  *   catching genuine re-processing of the same email/PDF.
  * - Customer names are normalized to canonical names (e.g. "Heritage
@@ -211,7 +215,20 @@ function processMessage_(message, existingOrderKeys) {
 
 function orderKey_(customer, poDate, poNumber, skuName) {
   var isPlaceholder = !skuName || skuName.toUpperCase() === 'TBD';
-  var thirdPart = isPlaceholder ? ('po:' + (poNumber || '')) : ('sku:' + skuName);
+
+  // PO Number is a much more reliable identifier than date when it's
+  // available — a follow-up email about the same PO (a BOL/pickup
+  // coordination message, a status check-in) will often carry a different
+  // or missing date than the original order email, but the PO Number stays
+  // the same. Match on PO Number + SKU in that case, ignoring date.
+  if (poNumber) {
+    var thirdPart = isPlaceholder ? 'manual-entry' : ('sku:' + skuName);
+    return [customer || '', 'po:' + poNumber, thirdPart].join('|').toLowerCase();
+  }
+
+  // No PO Number (e.g. an informal direct/local order) — fall back to
+  // Customer + PO Date + SKU as the best available proxy for a distinct order.
+  var thirdPart = isPlaceholder ? 'manual-entry' : ('sku:' + skuName);
   return [customer || '', poDate || '', thirdPart].join('|').toLowerCase();
 }
 
