@@ -567,7 +567,6 @@ function addLabel_(thread, labelName) {
 // same PO number/SKU can never both get written.
 // ─────────────────────────────────────────────────────────────────────────
 var FAIRE_ORDERS_URL = 'https://www.faire.com/external-api/v2/orders';
-var FAIRE_BACKFILL_DAYS = 1; // how far back to look on the very first pull
 
 function pullFaireOrders() {
   var headers = faireAuthHeaders_();
@@ -601,10 +600,15 @@ function pullFaireOrders() {
   props.setProperty('FAIRE_UPDATED_AT_MIN', maxUpdatedAtSeen);
 }
 
+// Only pull orders created/updated today or later on the very first run —
+// no historical backfill. Uses the script's own time zone (Project
+// Settings > time zone) so "today" matches what the team sees on the
+// clock, not UTC.
 function defaultFaireBackfillDate_() {
-  var d = new Date();
-  d.setDate(d.getDate() - FAIRE_BACKFILL_DAYS);
-  return d.toISOString();
+  var tz = Session.getScriptTimeZone();
+  var todayDateStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  var startOfToday = Utilities.parseDate(todayDateStr, tz, 'yyyy-MM-dd');
+  return startOfToday.toISOString();
 }
 
 function faireAuthHeaders_() {
