@@ -91,8 +91,8 @@ var CONFIG = {
   MAX_THREADS_PER_RUN: 40,
 
   // Hours of the day (24-hour, script's time zone) to run processOrderEmails.
-  // One trigger per hour listed here — currently morning / midday / evening.
-  RUN_HOURS: [8, 13, 20],
+  // One trigger per hour listed here.
+  RUN_HOURS: [8, 13, 17, 20],
 };
 
 var ORDERS_HEADER = [
