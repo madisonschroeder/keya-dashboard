@@ -1,11 +1,18 @@
 /**
- * Keya's Snacks — Order Tracking Email Scrubber
+ * Keya's Snacks — Order Tracking Email Scrubber + Faire API Pull
  * ================================================
- * Reads order emails out of the orders inbox (Faire, Airgoods, the online
- * store, Cureate, Hungryroot, Rainforest Distribution, KeHE/SPS Commerce,
- * and direct customer emails), asks Claude to extract structured order
- * data, and appends rows to the "Orders" tab of:
+ * Reads order emails out of the orders inbox (Airgoods, the online store,
+ * Cureate, Hungryroot, Rainforest Distribution, KeHE/SPS Commerce, and
+ * direct customer emails), asks Claude to extract structured order data,
+ * and appends rows to the "Orders" tab of:
  * https://docs.google.com/spreadsheets/d/173Y576EPf013k1XCsQF0r2IgKM3uzUUHBBKUl8zUC_s
+ *
+ * Faire orders are pulled directly from Faire's own API instead (see the
+ * "Faire API pull" section near the bottom of this file) since Faire's
+ * order-notification emails weren't arriving reliably. Both pipelines
+ * write to the same Orders tab and share the same dedupe/customer/SKU
+ * rules, so an order can't get double-entered no matter which path it
+ * came through.
  *
  * Business rules (SKU list, customer name aliases, hybrid manual-entry
  * sources, avocado oil flag, status vocabulary, dedupe logic) are ported
@@ -17,17 +24,24 @@
  *    run as whoever authorizes the script, so it must be created from
  *    inside that account, not your own).
  * 2. Go to script.google.com > New project. Paste this whole file in as Code.gs.
- * 3. Project Settings (gear icon) > Script Properties > add a property:
+ * 3. Project Settings (gear icon) > Script Properties > add:
  *      CLAUDE_API_KEY = <your Anthropic API key>
+ *      FAIRE_APPLICATION_ID = <from Faire's Brand Portal / Developer Portal>
+ *      FAIRE_APPLICATION_SECRET = <from Faire's Brand Portal / Developer Portal>
+ *      FAIRE_ACCESS_TOKEN = <the API key generated via Settings > Integrations
+ *        > "Have an unpublished integration?" in your Faire Brand Portal>
+ *    (If Faire credentials aren't set yet, pullFaireOrders() just logs a
+ *    warning and does nothing — the email pipeline works independently.)
  * 4. Run `setup()` once from the Apps Script editor (select it in the
  *    function dropdown, click Run). It will:
  *      - create the Gmail sub-labels this script uses to track state
  *      - create the "Needs Review" tab on the sheet if it doesn't exist
- *      - install time-driven triggers to run processOrderEmails() at the
- *        hours listed in CONFIG.RUN_HOURS below (currently 8am, 1pm, 8pm,
- *        in the script's time zone — Project Settings > time zone)
+ *      - install time-driven triggers to run processOrderEmails() AND
+ *        pullFaireOrders() at the hours listed in CONFIG.RUN_HOURS below
+ *        (currently 8am, 1pm, 5pm, 8pm, in the script's time zone —
+ *        Project Settings > time zone)
  *    The first run will prompt you to authorize Gmail + Sheets access.
- * 5. Done. New order emails will show up as rows after the next scheduled run.
+ * 5. Done. New orders will show up as rows after the next scheduled run.
  *
  * This scans the whole inbox (no Gmail label/filter setup required) since
  * this inbox is mostly order emails already — Claude's is_order check does
@@ -124,15 +138,17 @@ function setup() {
   getOrCreateSheet_(CONFIG.NEEDS_REVIEW_SHEET_NAME, NEEDS_REVIEW_HEADER);
   ensureOrdersHeader_();
   installTrigger_();
-  Logger.log('Setup complete. processOrderEmails() will run at hours: ' + CONFIG.RUN_HOURS.join(', ') + ' (script time zone).');
+  Logger.log('Setup complete. processOrderEmails() and pullFaireOrders() will run at hours: ' + CONFIG.RUN_HOURS.join(', ') + ' (script time zone).');
 }
 
 function installTrigger_() {
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'processOrderEmails') ScriptApp.deleteTrigger(t);
-  });
-  CONFIG.RUN_HOURS.forEach(function (hour) {
-    ScriptApp.newTrigger('processOrderEmails').timeBased().atHour(hour).everyDays(1).create();
+  ['processOrderEmails', 'pullFaireOrders'].forEach(function (fn) {
+    ScriptApp.getProjectTriggers().forEach(function (t) {
+      if (t.getHandlerFunction() === fn) ScriptApp.deleteTrigger(t);
+    });
+    CONFIG.RUN_HOURS.forEach(function (hour) {
+      ScriptApp.newTrigger(fn).timeBased().atHour(hour).everyDays(1).create();
+    });
   });
 }
 
@@ -266,8 +282,10 @@ var SYSTEM_PROMPT = [
   'a potato chip company. The orders inbox receives several different kinds',
   'of email:',
   '- Direct customer/distributor emails placing an order',
-  '- Faire and Airgoods order notifications (retailer name is the customer,',
-  '  NOT "Faire" or "Airgoods")',
+  '- Airgoods order notifications (retailer name is the customer, NOT',
+  '  "Airgoods"). Faire orders are NOT handled here — they come in through',
+  '  a separate direct API pull, so a Faire email in this inbox is almost',
+  '  always marketing, not an order.',
   '- The company\'s own online store (Squarespace) order notifications',
   '- Cureate and Hungryroot order notifications',
   '- Rainforest Distribution purchase orders, usually as a PDF attachment',
@@ -533,4 +551,182 @@ function ensureLabelsExist_() {
 function addLabel_(thread, labelName) {
   var label = GmailApp.getUserLabelByName(labelName) || GmailApp.createLabel(labelName);
   thread.addLabel(label);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Faire API pull — bypasses Faire's order-notification emails entirely
+// (Faire wasn't sending them) by pulling orders directly from Faire's
+// External API. Requires three Script Properties, generated via Faire's
+// Brand Portal (Settings > Integrations > "Have an unpublished
+// integration?"):
+//   FAIRE_APPLICATION_ID
+//   FAIRE_APPLICATION_SECRET
+//   FAIRE_ACCESS_TOKEN
+// Reuses the same Orders-tab dedupe, customer aliasing, and avocado oil
+// flag as the email pipeline, so a Faire order and an email mentioning the
+// same PO number/SKU can never both get written.
+// ─────────────────────────────────────────────────────────────────────────
+var FAIRE_ORDERS_URL = 'https://www.faire.com/external-api/v2/orders';
+var FAIRE_BACKFILL_DAYS = 90; // how far back to look on the very first pull
+
+function pullFaireOrders() {
+  var headers = faireAuthHeaders_();
+  if (!headers) {
+    Logger.log('Faire API not configured — set FAIRE_APPLICATION_ID, FAIRE_APPLICATION_SECRET, and FAIRE_ACCESS_TOKEN script properties to enable.');
+    return;
+  }
+
+  var props = PropertiesService.getScriptProperties();
+  var updatedAtMin = props.getProperty('FAIRE_UPDATED_AT_MIN') || defaultFaireBackfillDate_();
+  var existingOrderKeys = getExistingOrderKeys_();
+  var maxUpdatedAtSeen = updatedAtMin;
+
+  var cursor = null;
+  do {
+    var page = fetchFaireOrdersPage_(headers, updatedAtMin, cursor);
+    var orders = page.orders || [];
+
+    orders.forEach(function (order) {
+      try {
+        processFaireOrder_(order, existingOrderKeys);
+        if (order.updated_at && order.updated_at > maxUpdatedAtSeen) maxUpdatedAtSeen = order.updated_at;
+      } catch (err) {
+        Logger.log('Error processing Faire order ' + order.id + ': ' + err);
+      }
+    });
+
+    cursor = orders.length > 0 ? page.cursor : null;
+  } while (cursor);
+
+  props.setProperty('FAIRE_UPDATED_AT_MIN', maxUpdatedAtSeen);
+}
+
+function defaultFaireBackfillDate_() {
+  var d = new Date();
+  d.setDate(d.getDate() - FAIRE_BACKFILL_DAYS);
+  return d.toISOString();
+}
+
+function faireAuthHeaders_() {
+  var props = PropertiesService.getScriptProperties();
+  var applicationId = props.getProperty('FAIRE_APPLICATION_ID');
+  var applicationSecret = props.getProperty('FAIRE_APPLICATION_SECRET');
+  var accessToken = props.getProperty('FAIRE_ACCESS_TOKEN');
+  if (!applicationId || !applicationSecret || !accessToken) return null;
+
+  var credentials = Utilities.base64Encode(applicationId + ':' + applicationSecret);
+  return {
+    'X-FAIRE-APP-CREDENTIALS': credentials,
+    'X-FAIRE-OAUTH-ACCESS-TOKEN': accessToken,
+  };
+}
+
+function fetchFaireOrdersPage_(headers, updatedAtMin, cursor) {
+  var url = FAIRE_ORDERS_URL + '?limit=50&updated_at_min=' + encodeURIComponent(updatedAtMin) +
+    (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
+
+  var response = UrlFetchApp.fetch(url, {
+    method: 'get',
+    headers: headers,
+    muteHttpExceptions: true,
+  });
+
+  var code = response.getResponseCode();
+  var body = response.getContentText();
+  if (code !== 200) {
+    throw new Error('Faire API error ' + code + ': ' + body);
+  }
+
+  return JSON.parse(body);
+}
+
+function processFaireOrder_(order, existingOrderKeys) {
+  var customer = normalizeCustomerName_(faireCustomerName_(order));
+  var lineItems = (order.items || []).map(function (item) {
+    return {
+      sku_name: faireSkuToCanonical_(item.product_name, item.variant_name),
+      quantity: item.quantity === undefined ? null : item.quantity,
+    };
+  });
+
+  var extraction = {
+    is_order: true,
+    customer: customer,
+    po_number: order.purchase_order_number || order.display_id,
+    po_date: order.created_at ? isoToDate_(order.created_at) : null,
+    requested_delivery_date: order.requested_ship_date ? isoToDate_(order.requested_ship_date) :
+      (order.ship_after ? isoToDate_(order.ship_after) : null),
+    delivery_method: 'Drop Ship',
+    status: order.state === 'CANCELED' ? 'Cancelled' : 'New Order',
+    notes: order.notes || '',
+    line_items: lineItems,
+  };
+
+  var subjectLabel = 'Faire order ' + (order.display_id || order.id);
+  var link = 'Faire order ' + (order.display_id || order.id) + ' (internal id: ' + order.id + ')';
+
+  var missing = [];
+  if (!extraction.customer) missing.push('customer');
+  if (extraction.line_items.length === 0) missing.push('line_items');
+  if (missing.length > 0) {
+    logNeedsReviewGeneric_('Missing required field(s): ' + missing.join(', '), 'Faire API', subjectLabel, link, extraction);
+    return;
+  }
+
+  var newItems = extraction.line_items.filter(function (item) {
+    var key = orderKey_(extraction.customer, extraction.po_date, extraction.po_number, item.sku_name);
+    return !existingOrderKeys.has(key);
+  });
+
+  if (newItems.length === 0) {
+    logNeedsReviewGeneric_('Duplicate — all line items already in Orders tab (PO ' + extraction.po_number + ')', 'Faire API', subjectLabel, link, extraction);
+    return;
+  }
+
+  appendOrderRows_(extraction, newItems, link);
+
+  newItems.forEach(function (item) {
+    existingOrderKeys.add(orderKey_(extraction.customer, extraction.po_date, extraction.po_number, item.sku_name));
+  });
+}
+
+function faireCustomerName_(order) {
+  if (order.address && order.address.company_name) return order.address.company_name;
+  if (order.customer && (order.customer.first_name || order.customer.last_name)) {
+    return [order.customer.first_name, order.customer.last_name].filter(Boolean).join(' ');
+  }
+  return null;
+}
+
+// Faire returns product_name + variant_name as separate free-text fields
+// (e.g. "Bombay Spice Chips" + "6oz") rather than a single SKU-shaped
+// string, so this maps them onto the same canonical names the email
+// pipeline uses, via simple flavor + size keyword matching.
+function faireSkuToCanonical_(productName, variantName) {
+  var combined = ((productName || '') + ' ' + (variantName || '')).toLowerCase();
+
+  var flavor = null;
+  if (combined.indexOf('bombay') !== -1) flavor = 'Bombay Spice';
+  else if (combined.indexOf('black salt') !== -1) flavor = 'Black Salt';
+  else if (combined.indexOf('golden ranch') !== -1) flavor = 'Golden Ranch';
+
+  var isAvocadoOil = combined.indexOf('avo oil') !== -1 || combined.indexOf('avocado oil') !== -1;
+  if (isAvocadoOil && (flavor === 'Bombay Spice' || flavor === 'Black Salt')) {
+    return flavor + ' Avo Oil';
+  }
+
+  var size = null;
+  if (combined.indexOf('1.5') !== -1) size = '1.5oz';
+  else if (combined.indexOf('6oz') !== -1 || combined.indexOf('6 oz') !== -1) size = '6oz';
+
+  if (flavor && size) return flavor + ' ' + size;
+
+  // No confident match — return the raw text so it's still visible on the
+  // sheet row rather than silently dropped; worth adding a new keyword
+  // rule above if this starts showing up often.
+  return (productName || '') + (variantName ? ' - ' + variantName : '') || 'Unknown product';
+}
+
+function isoToDate_(isoTimestamp) {
+  return isoTimestamp.slice(0, 10); // 'YYYY-MM-DDTHH:mm:ss.sssZ' -> 'YYYY-MM-DD'
 }
