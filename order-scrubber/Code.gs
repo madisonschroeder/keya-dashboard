@@ -462,13 +462,17 @@ function appendOrderRows_(extraction, lineItems, permalink) {
 }
 
 function logNeedsReview_(reason, message, permalink, extraction) {
+  logNeedsReviewGeneric_(reason, message.getFrom(), message.getSubject(), permalink, extraction);
+}
+
+function logNeedsReviewGeneric_(reason, fromLabel, subjectLabel, link, extraction) {
   var sheet = getOrCreateSheet_(CONFIG.NEEDS_REVIEW_SHEET_NAME, NEEDS_REVIEW_HEADER);
   sheet.appendRow([
     new Date(),
     reason,
-    message.getFrom(),
-    message.getSubject(),
-    permalink,
+    fromLabel,
+    subjectLabel,
+    link,
     JSON.stringify(extraction),
   ]);
 }
