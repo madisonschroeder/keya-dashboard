@@ -2,9 +2,14 @@
  * Keya's Snacks — Order Tracking Email Scrubber
  * ================================================
  * Reads order emails out of the orders inbox (Faire, Airgoods, the online
- * store, wholesale/distributor POs, and direct customer emails), asks Claude
- * to extract structured order data, and appends rows to the "Orders" tab of:
+ * store, Cureate, Hungryroot, Rainforest Distribution, KeHE/SPS Commerce,
+ * and direct customer emails), asks Claude to extract structured order
+ * data, and appends rows to the "Orders" tab of:
  * https://docs.google.com/spreadsheets/d/173Y576EPf013k1XCsQF0r2IgKM3uzUUHBBKUl8zUC_s
+ *
+ * Business rules (SKU list, customer name aliases, hybrid manual-entry
+ * sources, avocado oil flag, status vocabulary, dedupe logic) are ported
+ * from the working Tasklet-based system already used for this client.
  *
  * SETUP (one time)
  * -----------------
@@ -30,18 +35,29 @@
  *   line items (one row per SKU).
  * - Rule: REQUIRED FIELDS. If Claude can't find a customer name, a PO/order
  *   number, or at least one line item, the row is NOT written to the Orders
- *   tab — it goes to "Needs Review" instead so nobody has to dig through
- *   Gmail to find out why an order didn't show up.
- * - Rule: DEDUPE BY PO NUMBER. Before writing, the script reads every PO
- *   Number already in the Orders tab. If a parsed PO number already exists,
- *   the email is skipped (logged to Needs Review as a duplicate) so
- *   re-processing or forwarded copies never create double rows.
+ *   tab — it goes to "Needs Review" instead.
+ * - Rule: HYBRID MANUAL ENTRY. Rainforest Distribution POs (PDF attachment)
+ *   and KeHE/SPS Commerce notifications (details behind a portal login)
+ *   still get a row — with SKU Name "TBD" and "MANUAL ENTRY NEEDED" in
+ *   Notes — rather than being dropped or sent to Needs Review, matching how
+ *   the team already works these.
+ * - Rule: DEDUPE. Before writing, the script builds a key per existing row
+ *   of Customer + PO Date + (SKU Name, or PO Number when SKU is "TBD"). A
+ *   new line item matching an existing key is skipped as a duplicate. This
+ *   allows multiple SKUs on the same PO to all get written, while still
+ *   catching genuine re-processing of the same email/PDF.
+ * - Customer names are normalized to canonical names (e.g. "Heritage
+ *   Foods" -> "Virginia Heritage") and avocado oil SKUs get an "AVOCADO
+ *   OIL" flag prepended to Notes — both editable in the CONFIG section
+ *   below as the client's product/customer list evolves.
  * - Distributor POs sent as PDF attachments are read too (first PDF
- *   attachment is sent to Claude alongside the email text).
+ *   attachment is sent to Claude alongside the email text) — Claude reads
+ *   the PDF directly, falling back to the manual-entry pattern only if the
+ *   PDF text isn't legible.
  */
 
 // ─────────────────────────────────────────────────────────────────────────
-// CONFIG — the only section you should need to touch
+// CONFIG — the sections you'll actually need to touch over time
 // ─────────────────────────────────────────────────────────────────────────
 var CONFIG = {
   SPREADSHEET_ID: '173Y576EPf013k1XCsQF0r2IgKM3uzUUHBBKUl8zUC_s',
@@ -72,6 +88,17 @@ var ORDERS_HEADER = [
 var NEEDS_REVIEW_HEADER = [
   'Date Flagged', 'Reason', 'From', 'Subject', 'Gmail Link', 'Raw Extraction (JSON)',
 ];
+
+// Canonical customer names. "Add new mappings as you discover them" — same
+// rule as the original Tasklet system. Match is case-insensitive substring.
+var CUSTOMER_ALIASES = [
+  { match: ['heritage foods', 'heritage'], canonical: 'Virginia Heritage' },
+  { match: ['hungry root', 'hungryroot'], canonical: 'Hungryroot' },
+  { match: ['gravity brewing'], canonical: 'Final Gravity Brewing' },
+];
+
+// SKUs that trigger the "AVOCADO OIL" notes flag.
+var AVOCADO_OIL_SKUS = ['bombay spice avo oil', 'black salt avo oil', 'avocado oil'];
 
 // ─────────────────────────────────────────────────────────────────────────
 // One-time setup
@@ -108,12 +135,12 @@ function processOrderEmails() {
   var threads = GmailApp.search(query, 0, CONFIG.MAX_THREADS_PER_RUN);
   if (threads.length === 0) return;
 
-  var existingPoNumbers = getExistingPoNumbers_();
+  var existingOrderKeys = getExistingOrderKeys_();
 
   threads.forEach(function (thread) {
     thread.getMessages().forEach(function (message) {
       try {
-        processMessage_(message, existingPoNumbers);
+        processMessage_(message, existingOrderKeys);
       } catch (err) {
         Logger.log('Error processing message ' + message.getId() + ': ' + err);
         addLabel_(thread, CONFIG.LABEL_ERROR);
@@ -122,7 +149,7 @@ function processOrderEmails() {
   });
 }
 
-function processMessage_(message, existingPoNumbers) {
+function processMessage_(message, existingOrderKeys) {
   var extraction = callClaudeApi_(message);
   var permalink = 'https://mail.google.com/mail/u/0/#inbox/' + message.getId();
   var thread = message.getThread();
@@ -132,6 +159,8 @@ function processMessage_(message, existingPoNumbers) {
     addLabel_(thread, CONFIG.LABEL_NOT_ORDER);
     return;
   }
+
+  extraction.customer = normalizeCustomerName_(extraction.customer);
 
   var missing = [];
   if (!extraction.customer) missing.push('customer');
@@ -144,16 +173,48 @@ function processMessage_(message, existingPoNumbers) {
     return;
   }
 
-  var poNumber = String(extraction.po_number).trim();
-  if (existingPoNumbers.has(poNumber)) {
-    logNeedsReview_('Duplicate PO Number "' + poNumber + '" — already in Orders tab', message, permalink, extraction);
+  // Dedupe per line item: Customer + PO Date + (SKU Name, or PO Number when
+  // the SKU is a manual-entry placeholder). This lets multiple genuine SKUs
+  // on one PO all get written, while still catching re-processed emails.
+  var newItems = extraction.line_items.filter(function (item) {
+    var key = orderKey_(extraction.customer, extraction.po_date, extraction.po_number, item.sku_name);
+    if (existingOrderKeys.has(key)) return false;
+    existingOrderKeys.add(key);
+    return true;
+  });
+
+  if (newItems.length === 0) {
+    logNeedsReview_('Duplicate — all line items already in Orders tab (PO ' + extraction.po_number + ')', message, permalink, extraction);
     addLabel_(thread, CONFIG.LABEL_DUPLICATE);
     return;
   }
-  existingPoNumbers.add(poNumber);
 
-  appendOrderRows_(extraction, permalink);
+  appendOrderRows_(extraction, newItems, permalink);
   addLabel_(thread, CONFIG.LABEL_PROCESSED);
+}
+
+function orderKey_(customer, poDate, poNumber, skuName) {
+  var isPlaceholder = !skuName || skuName.toUpperCase() === 'TBD';
+  var thirdPart = isPlaceholder ? ('po:' + (poNumber || '')) : ('sku:' + skuName);
+  return [customer || '', poDate || '', thirdPart].join('|').toLowerCase();
+}
+
+function normalizeCustomerName_(rawName) {
+  if (!rawName) return rawName;
+  var lower = rawName.toLowerCase();
+  for (var i = 0; i < CUSTOMER_ALIASES.length; i++) {
+    var alias = CUSTOMER_ALIASES[i];
+    for (var j = 0; j < alias.match.length; j++) {
+      if (lower.indexOf(alias.match[j]) !== -1) return alias.canonical;
+    }
+  }
+  return rawName;
+}
+
+function isAvocadoOilSku_(skuName) {
+  if (!skuName) return false;
+  var lower = skuName.toLowerCase();
+  return AVOCADO_OIL_SKUS.some(function (needle) { return lower.indexOf(needle) !== -1; });
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -162,32 +223,65 @@ function processMessage_(message, existingPoNumbers) {
 var SYSTEM_PROMPT = [
   'You extract structured order data from a single email for Keya\'s Snacks,',
   'a potato chip company. The orders inbox receives several different kinds',
-  'of email: Faire order notifications, Airgoods order notifications, the',
-  'company\'s own online store notifications, wholesale/distributor purchase',
-  'orders (sometimes as a PDF attachment, sometimes plain text), and direct,',
-  'freeform emails from customers or distributors placing an order.',
+  'of email:',
+  '- Direct customer/distributor emails placing an order',
+  '- Faire and Airgoods order notifications (retailer name is the customer,',
+  '  NOT "Faire" or "Airgoods")',
+  '- The company\'s own online store (Squarespace) order notifications',
+  '- Cureate and Hungryroot order notifications',
+  '- Rainforest Distribution purchase orders, usually as a PDF attachment',
+  '- KeHE Distributors purchase orders, arriving as an SPS Commerce',
+  '  notification email that does NOT contain the actual order details —',
+  '  those live behind a portal login you do not have access to',
   '',
-  'Read the email (and any attached PDF) and decide: is this actually a new',
-  'order or purchase order? If it is a shipping notification, marketing',
-  'email, newsletter, receipt for something unrelated, or any other email',
-  'that is not itself placing/confirming a new order, set is_order to false',
-  'and explain briefly in notes why.',
+  'STEP 1 — Decide if this is actually an order.',
+  'IS an order: a customer placing an order, a forwarded purchase order,',
+  'orders from Cureate/Hungryroot/Faire/Airgoods, reorders from existing',
+  'customers, sample requests with specific quantities.',
+  'Is NOT an order: shipping/tracking updates only, payment confirmations,',
+  'warehouse communications without a new order, general inquiries with no',
+  'order placed, shipping quote requests, marketing/newsletters.',
+  'If it is not an order, set is_order to false and briefly explain why in notes.',
   '',
-  'If it is an order, extract:',
+  'STEP 2 — If it is an order, extract:',
   '- customer: the customer, buyer, retailer, or distributor name (not Keya\'s',
-  '  Snacks itself).',
-  '- po_number: the purchase order number, order number, or confirmation',
-  '  number. If the source is a platform like Faire that only shows an order',
-  '  ID, use that ID.',
+  '  Snacks itself). Use the name as written; do not guess a canonical form.',
+  '- po_number: the purchase order number, order number, or confirmation ID.',
   '- po_date: the date the order was placed, as YYYY-MM-DD. Null if not stated.',
-  '- requested_delivery_date: a requested/needed-by delivery date if the',
-  '  customer specified one, as YYYY-MM-DD. Null if not stated.',
-  '- delivery_method: shipping/delivery method or carrier if mentioned',
-  '  (e.g. "UPS Ground", "LTL freight", "Faire fulfillment"). Null if not stated.',
-  '- line_items: one entry per distinct product/SKU ordered, with the product',
-  '  name as written (sku_name) and the quantity ordered (quantity, a number).',
-  '- notes: anything else useful for the fulfillment team (shipping address,',
-  '  special instructions, ambiguities in the source data). Keep it short.',
+  '- requested_delivery_date: a requested/needed-by delivery date if stated,',
+  '  as YYYY-MM-DD. Null if not stated.',
+  '- delivery_method: prefer one of "LTL", "Drop Ship", or "Local" when you',
+  '  can tell; "Local" usually means Richmond, VA area. Airgoods orders',
+  '  default to "Drop Ship" unless the email says otherwise. Use "TBD" if',
+  '  genuinely unclear.',
+  '- line_items: one entry per distinct product/SKU ordered. Products are',
+  '  potato chips in 1.5oz and 6oz sizes (flavors: Bombay Spice, Black Salt,',
+  '  Golden Ranch) plus 5.5oz avocado oil variants (Bombay Spice Avo Oil,',
+  '  Black Salt Avo Oil). Normalize sku_name to one of: "Bombay Spice 6oz",',
+  '  "Black Salt 6oz", "Golden Ranch 6oz", "Bombay Spice Avo Oil", "Black',
+  '  Salt Avo Oil", "Bombay Spice 1.5oz", "Black Salt 1.5oz", "Golden Ranch',
+  '  1.5oz" whenever the email is describing one of these products, even if',
+  '  worded differently. Rainforest Distribution emails sometimes reference',
+  '  internal item codes instead of names — map them: 180400 = Bombay Spice',
+  '  6oz, 180401 = Black Salt 6oz, 180402 = Bombay Spice Avo Oil, 180410 =',
+  '  Bombay Spice 1.5oz, 180411 = Black Salt 1.5oz. "Case" is the standard',
+  '  unit — quantity is the number of cases.',
+  '- notes: PO numbers already captured elsewhere don\'t need repeating;',
+  '  use this for special instructions, shipping address, or ambiguities.',
+  '',
+  'STEP 3 — Hybrid manual-entry sources (Rainforest PDF, KeHE/SPS Commerce).',
+  'For a Rainforest Distribution PO, first try to read the attached PDF and',
+  'extract real line items exactly like any other order. Only if the PDF',
+  'text is not legible (garbled, scanned image you cannot read, etc.) fall',
+  'back to: one line item with sku_name "TBD" and quantity null, and explain',
+  'in notes: "MANUAL ENTRY NEEDED - Rainforest PDF PO. SKU/QTY in attached',
+  'PDF." Still capture customer ("Rainforest Distribution" if no more',
+  'specific name given), po_number, and po_date if visible.',
+  'For KeHE / SPS Commerce notifications, the order details are never in',
+  'the email itself — always use: customer "KeHE Distributors", one line',
+  'item with sku_name "TBD" and quantity null, delivery_method "LTL", and',
+  'notes: "MANUAL ENTRY NEEDED - KeHE via SPS Commerce. Login to portal for',
+  'details." Still capture po_number and po_date if visible in the notification.',
   '',
   'Always respond with the JSON object described by the schema. Do not',
   'invent data that is not in the email — use null for anything not present.',
@@ -202,6 +296,7 @@ var ORDER_SCHEMA = {
     po_date: { type: ['string', 'null'] },
     requested_delivery_date: { type: ['string', 'null'] },
     delivery_method: { type: ['string', 'null'] },
+    status: { type: 'string', enum: ['New Order', 'Cancelled'] },
     notes: { type: 'string' },
     line_items: {
       type: 'array',
@@ -216,7 +311,7 @@ var ORDER_SCHEMA = {
       },
     },
   },
-  required: ['is_order', 'customer', 'po_number', 'po_date', 'requested_delivery_date', 'delivery_method', 'notes', 'line_items'],
+  required: ['is_order', 'customer', 'po_number', 'po_date', 'requested_delivery_date', 'delivery_method', 'status', 'notes', 'line_items'],
   additionalProperties: false,
 };
 
@@ -294,25 +389,26 @@ function getFirstPdfAttachment_(message) {
 // ─────────────────────────────────────────────────────────────────────────
 // Sheet writes
 // ─────────────────────────────────────────────────────────────────────────
-function appendOrderRows_(extraction, permalink) {
+function appendOrderRows_(extraction, lineItems, permalink) {
   var sheet = getOrCreateSheet_(CONFIG.SHEET_NAME, ORDERS_HEADER);
   var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
-  var notes = extraction.notes ? extraction.notes + ' (source: ' + permalink + ')' : '(source: ' + permalink + ')';
+  var baseNotes = extraction.notes ? extraction.notes + ' (source: ' + permalink + ')' : '(source: ' + permalink + ')';
 
-  extraction.line_items.forEach(function (item) {
+  lineItems.forEach(function (item) {
+    var notes = isAvocadoOilSku_(item.sku_name) ? 'AVOCADO OIL | ' + baseNotes : baseNotes;
     sheet.appendRow([
-      'New',                              // Status
-      extraction.customer,                // Customer
-      extraction.po_number,                // PO Number
-      extraction.po_date || '',           // PO Date
-      today,                               // PO Entered
-      '',                                  // PO to 3PL Date (filled manually)
+      extraction.status || 'New Order',   // Status
+      extraction.customer,                 // Customer
+      extraction.po_number,                 // PO Number
+      extraction.po_date || '',            // PO Date
+      today,                                // PO Entered
+      '',                                   // PO to 3PL Date (filled manually)
       extraction.requested_delivery_date || '', // Requested Delivery Date
-      '',                                  // Actual Delivery Date (filled manually)
-      item.sku_name,                       // SKU Name
-      item.quantity,                       // QTY
-      extraction.delivery_method || '',   // Method of Delivery
-      notes,                               // Notes
+      '',                                   // Actual Delivery Date (filled manually)
+      item.sku_name,                        // SKU Name
+      (item.quantity === null || item.quantity === undefined) ? 'TBD' : item.quantity, // QTY
+      extraction.delivery_method || 'TBD', // Method of Delivery
+      notes,                                // Notes
     ]);
   });
 }
@@ -329,17 +425,24 @@ function logNeedsReview_(reason, message, permalink, extraction) {
   ]);
 }
 
-function getExistingPoNumbers_() {
+function getExistingOrderKeys_() {
   var sheet = getOrCreateSheet_(CONFIG.SHEET_NAME, ORDERS_HEADER);
   var lastRow = sheet.getLastRow();
   var set = new Set();
   if (lastRow < 2) return set;
 
-  var poColIndex = ORDERS_HEADER.indexOf('PO Number') + 1;
-  var values = sheet.getRange(2, poColIndex, lastRow - 1, 1).getValues();
+  var customerCol = ORDERS_HEADER.indexOf('Customer') + 1;
+  var poNumberCol = ORDERS_HEADER.indexOf('PO Number') + 1;
+  var poDateCol = ORDERS_HEADER.indexOf('PO Date') + 1;
+  var skuCol = ORDERS_HEADER.indexOf('SKU Name') + 1;
+
+  var values = sheet.getRange(2, 1, lastRow - 1, ORDERS_HEADER.length).getValues();
   values.forEach(function (row) {
-    var v = String(row[0] || '').trim();
-    if (v) set.add(v);
+    var customer = row[customerCol - 1];
+    var poNumber = row[poNumberCol - 1];
+    var poDate = row[poDateCol - 1];
+    var sku = row[skuCol - 1];
+    set.add(orderKey_(customer, poDate, poNumber, sku));
   });
   return set;
 }
