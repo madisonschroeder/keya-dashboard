@@ -13,13 +13,12 @@
  *
  * SETUP (one time)
  * -----------------
- * 1. Go to script.google.com > New project. Paste this whole file in as Code.gs.
- * 2. Project Settings (gear icon) > Script Properties > add a property:
+ * 1. Log into the orders inbox's Google account directly (script triggers
+ *    run as whoever authorizes the script, so it must be created from
+ *    inside that account, not your own).
+ * 2. Go to script.google.com > New project. Paste this whole file in as Code.gs.
+ * 3. Project Settings (gear icon) > Script Properties > add a property:
  *      CLAUDE_API_KEY = <your Anthropic API key>
- * 3. In Gmail, set up a filter that applies a label called "orders" to
- *    incoming order emails (from Faire, Airgoods, the store, distributors,
- *    customers, etc). This script only ever looks at mail labeled "orders" —
- *    it does not scan the whole inbox.
  * 4. Run `setup()` once from the Apps Script editor (select it in the
  *    function dropdown, click Run). It will:
  *      - create the Gmail sub-labels this script uses to track state
@@ -27,6 +26,12 @@
  *      - install a time-driven trigger to run processOrderEmails() every 15 min
  *    The first run will prompt you to authorize Gmail + Sheets access.
  * 5. Done. New order emails will show up as rows within ~15 minutes.
+ *
+ * This scans the whole inbox (no Gmail label/filter setup required) since
+ * this inbox is mostly order emails already — Claude's is_order check does
+ * the filtering instead of a label. If that stops being true and the inbox
+ * picks up a lot of unrelated mail, set CONFIG.GMAIL_LABEL below to scope
+ * it to a label instead.
  *
  * HOW IT DECIDES WHAT TO WRITE
  * -----------------------------
@@ -64,9 +69,9 @@ var CONFIG = {
   SHEET_NAME: 'Orders',
   NEEDS_REVIEW_SHEET_NAME: 'Needs Review',
 
-  // Gmail label applied (via a Gmail filter you set up) to incoming order
-  // emails. The script only reads mail with this label.
-  GMAIL_LABEL: 'orders',
+  // Optional: set this to a Gmail label (e.g. 'orders') to scope processing
+  // to only mail with that label. Leave '' to scan the whole inbox.
+  GMAIL_LABEL: '',
 
   // Sub-labels the script manages itself to avoid reprocessing a message.
   LABEL_PROCESSED: 'orders/processed',
@@ -125,7 +130,7 @@ function processOrderEmails() {
   ensureLabelsExist_();
   ensureOrdersHeader_();
 
-  var query = 'label:' + CONFIG.GMAIL_LABEL +
+  var query = (CONFIG.GMAIL_LABEL ? 'label:' + CONFIG.GMAIL_LABEL : 'in:inbox') +
     ' -label:' + CONFIG.LABEL_PROCESSED +
     ' -label:' + CONFIG.LABEL_DUPLICATE +
     ' -label:' + CONFIG.LABEL_NOT_ORDER +
