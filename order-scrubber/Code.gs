@@ -568,6 +568,15 @@ function addLabel_(thread, labelName) {
 // ─────────────────────────────────────────────────────────────────────────
 var FAIRE_ORDERS_URL = 'https://www.faire.com/external-api/v2/orders';
 
+// Hard floor: orders originally CREATED before this date are never pulled
+// in, no matter what. This is separate from the incremental "what's new"
+// cursor (FAIRE_UPDATED_AT_MIN) because Faire's updated_at_min filter
+// tracks when an order was last TOUCHED (status change, payout, etc.), not
+// when it was placed — an old order that gets its payout processed later
+// shows up as "updated today" even though it's months old. Update this
+// value if you ever intentionally want to move the floor.
+var FAIRE_MIN_CREATED_AT = '2026-07-01';
+
 function pullFaireOrders() {
   var headers = faireAuthHeaders_();
   if (!headers) {
@@ -576,7 +585,9 @@ function pullFaireOrders() {
   }
 
   var props = PropertiesService.getScriptProperties();
-  var updatedAtMin = props.getProperty('FAIRE_UPDATED_AT_MIN') || defaultFaireBackfillDate_();
+  var floorIso = new Date(FAIRE_MIN_CREATED_AT + 'T00:00:00.000Z').toISOString();
+  var updatedAtMin = props.getProperty('FAIRE_UPDATED_AT_MIN') || floorIso;
+  if (updatedAtMin < floorIso) updatedAtMin = floorIso; // never let a stale cursor go below the floor either
   var existingOrderKeys = getExistingOrderKeys_();
   var maxUpdatedAtSeen = updatedAtMin;
 
@@ -587,6 +598,7 @@ function pullFaireOrders() {
 
     orders.forEach(function (order) {
       try {
+        if (order.created_at && order.created_at < floorIso) return; // hard floor — always skip, regardless of why it showed up
         processFaireOrder_(order, existingOrderKeys);
         if (order.updated_at && order.updated_at > maxUpdatedAtSeen) maxUpdatedAtSeen = order.updated_at;
       } catch (err) {
@@ -598,17 +610,6 @@ function pullFaireOrders() {
   } while (cursor);
 
   props.setProperty('FAIRE_UPDATED_AT_MIN', maxUpdatedAtSeen);
-}
-
-// Only pull orders created/updated today or later on the very first run —
-// no historical backfill. Uses the script's own time zone (Project
-// Settings > time zone) so "today" matches what the team sees on the
-// clock, not UTC.
-function defaultFaireBackfillDate_() {
-  var tz = Session.getScriptTimeZone();
-  var todayDateStr = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
-  var startOfToday = Utilities.parseDate(todayDateStr, tz, 'yyyy-MM-dd');
-  return startOfToday.toISOString();
 }
 
 function faireAuthHeaders_() {
