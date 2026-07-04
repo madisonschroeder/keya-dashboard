@@ -624,6 +624,11 @@ function faireAuthHeaders_() {
 
   var credentials = Utilities.base64Encode(applicationId + ':' + applicationSecret);
   return {
+    // Sent alongside the documented custom headers below, in case the 401
+    // is coming from a gateway/container-level auth check that expects
+    // standard HTTP Basic Auth rather than (or in addition to) the custom
+    // X-FAIRE-APP-CREDENTIALS header — same underlying value either way.
+    'Authorization': 'Basic ' + credentials,
     'X-FAIRE-APP-CREDENTIALS': credentials,
     'X-FAIRE-OAUTH-ACCESS-TOKEN': accessToken,
   };
