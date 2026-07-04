@@ -47,7 +47,10 @@
  * this inbox is mostly order emails already — Claude's is_order check does
  * the filtering instead of a label. If that stops being true and the inbox
  * picks up a lot of unrelated mail, set CONFIG.GMAIL_LABEL below to scope
- * it to a label instead.
+ * it to a label instead. Only email dated on/after CONFIG.MIN_EMAIL_DATE is
+ * looked at — otherwise the scrubber works through the entire historical
+ * inbox backlog over time, resurfacing genuinely old (but valid) orders as
+ * if they were new. Matches the same 7/1 floor used on the Faire side.
  *
  * HOW IT DECIDES WHAT TO WRITE
  * -----------------------------
@@ -93,6 +96,13 @@ var CONFIG = {
   // Optional: set this to a Gmail label (e.g. 'orders') to scope processing
   // to only mail with that label. Leave '' to scan the whole inbox.
   GMAIL_LABEL: '',
+
+  // Hard floor, same as FAIRE_MIN_CREATED_AT below — never look at email
+  // older than this date. Format must be YYYY/MM/DD (Gmail search syntax).
+  // Without this, the scrubber works through the entire historical inbox
+  // backlog over time, surfacing genuinely old (but valid) orders as if
+  // they were new simply because it had never seen that email before.
+  MIN_EMAIL_DATE: '2026/07/01',
 
   // Sub-labels the script manages itself to avoid reprocessing a message.
   LABEL_PROCESSED: 'orders/processed',
@@ -160,6 +170,7 @@ function processOrderEmails() {
   ensureOrdersHeader_();
 
   var query = (CONFIG.GMAIL_LABEL ? 'label:' + CONFIG.GMAIL_LABEL : 'in:inbox') +
+    ' after:' + CONFIG.MIN_EMAIL_DATE +
     ' -label:' + CONFIG.LABEL_PROCESSED +
     ' -label:' + CONFIG.LABEL_DUPLICATE +
     ' -label:' + CONFIG.LABEL_NOT_ORDER +
