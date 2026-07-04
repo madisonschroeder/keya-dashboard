@@ -632,7 +632,9 @@ function faireAuthHeaders_() {
 // Diagnostic only — logs metadata about the three Faire script properties
 // (length, whether they contain whitespace/newlines) WITHOUT ever logging
 // the actual secret values, so the output is safe to paste into chat.
-function debugFaireCredentials_() {
+// No trailing underscore on purpose — Apps Script hides "_"-suffixed
+// functions from the run dropdown, and this one needs to be run directly.
+function debugFaireCredentials() {
   var props = PropertiesService.getScriptProperties();
   ['FAIRE_APPLICATION_ID', 'FAIRE_APPLICATION_SECRET', 'FAIRE_ACCESS_TOKEN'].forEach(function (key) {
     var raw = props.getProperty(key);
