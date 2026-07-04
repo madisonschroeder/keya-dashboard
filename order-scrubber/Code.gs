@@ -614,9 +614,12 @@ function pullFaireOrders() {
 
 function faireAuthHeaders_() {
   var props = PropertiesService.getScriptProperties();
-  var applicationId = props.getProperty('FAIRE_APPLICATION_ID');
-  var applicationSecret = props.getProperty('FAIRE_APPLICATION_SECRET');
-  var accessToken = props.getProperty('FAIRE_ACCESS_TOKEN');
+  // .trim() guards against a stray trailing newline/space from copy-pasting
+  // out of a browser, which silently breaks Base64 credentials and 401s
+  // with no useful error message.
+  var applicationId = (props.getProperty('FAIRE_APPLICATION_ID') || '').trim();
+  var applicationSecret = (props.getProperty('FAIRE_APPLICATION_SECRET') || '').trim();
+  var accessToken = (props.getProperty('FAIRE_ACCESS_TOKEN') || '').trim();
   if (!applicationId || !applicationSecret || !accessToken) return null;
 
   var credentials = Utilities.base64Encode(applicationId + ':' + applicationSecret);
@@ -624,6 +627,27 @@ function faireAuthHeaders_() {
     'X-FAIRE-APP-CREDENTIALS': credentials,
     'X-FAIRE-OAUTH-ACCESS-TOKEN': accessToken,
   };
+}
+
+// Diagnostic only — logs metadata about the three Faire script properties
+// (length, whether they contain whitespace/newlines) WITHOUT ever logging
+// the actual secret values, so the output is safe to paste into chat.
+function debugFaireCredentials_() {
+  var props = PropertiesService.getScriptProperties();
+  ['FAIRE_APPLICATION_ID', 'FAIRE_APPLICATION_SECRET', 'FAIRE_ACCESS_TOKEN'].forEach(function (key) {
+    var raw = props.getProperty(key);
+    if (raw === null) {
+      Logger.log(key + ': NOT SET');
+      return;
+    }
+    var trimmed = raw.trim();
+    Logger.log(
+      key + ': length=' + raw.length +
+      ', trimmedLength=' + trimmed.length +
+      ', hasWhitespaceOrNewline=' + (raw !== trimmed) +
+      ', startsWith=' + raw.slice(0, 3) + '...'
+    );
+  });
 }
 
 function fetchFaireOrdersPage_(headers, updatedAtMin, cursor) {
